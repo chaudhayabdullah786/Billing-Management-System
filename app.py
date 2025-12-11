@@ -1,3 +1,4 @@
+# app.py (corrected full file)
 from flask import Flask, render_template, redirect, url_for, flash, request, jsonify, send_file
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash
@@ -7,6 +8,7 @@ from decimal import Decimal
 import csv
 import io
 import os
+import urllib.parse
 
 from config import Config
 from models import db, User, Product, Category, Customer, Invoice, InvoiceItem, ActivityLog, log_activity
@@ -15,12 +17,59 @@ from pdf_generator import generate_invoice_pdf
 app = Flask(__name__)
 app.config.from_object(Config)
 
-db.init_app(app)
+# ---------------- Safe DB configuration & init ----------------
+# Prefer DATABASE_URL env var. Otherwise build Neon URL or fallback to sqlite.
+NEON_USER = "neondb_owner"
+NEON_PASS = "npg_DnszMEV6xQl9"
+NEON_HOST = "ep-proud-bush-adgpmvfq-pooler.c-2.us-east-1.aws.neon.tech"
+NEON_DB   = "neondb"
+NEON_QUERY = "sslmode=require&channel_binding=require"
+
+auth = f"{urllib.parse.quote_plus(NEON_USER)}:{urllib.parse.quote_plus(NEON_PASS)}@{NEON_HOST}/{NEON_DB}"
+base_without_scheme = f"{auth}?{NEON_QUERY}"
+
+env_db = os.environ.get("DATABASE_URL")
+if env_db:
+    app.config["SQLALCHEMY_DATABASE_URI"] = env_db
+else:
+    scheme = None
+    try:
+        import psycopg  # psycopg v3
+        scheme = "postgresql+psycopg"
+        print("[INFO] Detected psycopg (v3).")
+    except Exception:
+        try:
+            import psycopg2  # psycopg2
+            scheme = "postgresql+psycopg2"
+            print("[INFO] Detected psycopg2.")
+        except Exception:
+            scheme = None
+
+    if scheme:
+        app.config["SQLALCHEMY_DATABASE_URI"] = f"{scheme}://{base_without_scheme}"
+    else:
+        app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///local_dev.db"
+        print("[WARNING] No PostgreSQL driver found. Falling back to sqlite (local_dev.db).")
+
+# SQLAlchemy recommended settings
+app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
+# Keep pool_pre_ping to reduce stale connection errors with cloud DBs
+app.config.setdefault("SQLALCHEMY_ENGINE_OPTIONS", {"pool_pre_ping": True})
+
+# Initialize DB safely: call init_app only if not already registered
+if not getattr(app, "extensions", None) or "sqlalchemy" not in app.extensions:
+    db.init_app(app)
+    print("[INFO] SQLAlchemy initialized with Flask app.")
+else:
+    print("[INFO] SQLAlchemy already initialized on this Flask app — skipping init.")
+
+# ----------------------------------------------------------------
 
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 login_manager.login_message_category = 'info'
+
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -858,5 +907,9 @@ def utility_processor():
     }
 
 if __name__ == '__main__':
-    init_db()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # only initialize sample DB in development
+    env = os.environ.get('FLASK_ENV', 'development')
+    if env in ('development', 'dev'):
+        with app.app_context():
+            init_db()
+    app.run(host='0.0.0.0', port=5000, debug=(env in ('development', 'dev')))
